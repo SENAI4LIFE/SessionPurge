@@ -144,6 +144,8 @@ namespace SessionPurge.Tests
                 Run("Naming never opens synthetic authentication or settings files", NamingDoesNotReadCredentials);
                 Run("GUI launch, synthetic scan, grouping and search", () => OnUiLoop(Gui));
                 Run("GUI privacy, title search, single layout and confirmation expiry", () => OnUiLoop(GuiNamesAndLayout));
+                Run("Embedded icon has every size and is used by both windows", () => OnUiLoop(IconLoading));
+                Run("Theme colors meet 4.5:1 contrast and high contrast keeps system colors", () => OnUiLoop(ThemeColors));
                 Run("GUI workflow deletes only the confirmed session, F5 rescans and Ctrl+F focuses search", () => OnUiLoop(GuiWorkflow));
                 Run("Selection and deletion plans are capped at 500 sessions", () => OnUiLoop(SelectionCap));
                 Run("Production executable loads and starts with no provider selected", () => OnUiLoop(Production));
