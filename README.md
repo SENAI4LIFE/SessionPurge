@@ -1,56 +1,178 @@
+<p align="center">
+  <img src="assets/SessionPurge.png" width="96" alt="SessionPurge icon">
+</p>
+
 # SessionPurge
 
-An offline, portable Windows browser for local Claude Code and Codex history, with conservative permanent deletion. MIT licensed. Supported JSON history can be deleted together with its matching shared records. SQLite-backed homes, linked sessions, and unrecognized artifact layouts remain browse-only; this is not a complete purge utility for every current provider installation.
+Browse and permanently delete local Claude Code and Codex session history on Windows.
+
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-lightgrey.svg)](#requirements)
+[![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.8-512bd4.svg)](https://dotnet.microsoft.com/download/dotnet-framework/net48)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+SessionPurge is an offline, portable desktop app that lists the sessions stored
+by Claude Code and Codex on the local machine, shows each one by its title, and
+deletes the sessions you select together with the files and shared history
+records that belong to them. Eligibility is decided per session: a session that
+cannot be deleted safely is marked as blocked and shows the specific reason.
+
+## Requirements
+
+- Windows 10 or 11, x64, with .NET Framework 4.8
+- A local NTFS volume for the provider home
+- A standard (non-elevated) user account; SessionPurge refuses to run elevated
+- For Codex homes that keep thread data in SQLite: the Codex CLI with a
+  `delete` command
+
+The executable is unsigned, so Smart App Control or another application-control
+policy may block it.
+
+## Installation
+
+There is no installer and nothing is downloaded. Build the executable from a
+checkout with the .NET Framework compiler that ships with Windows:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+This produces `SessionPurge.exe` in the project root. To also create a Desktop
+shortcut to it, add `-Shortcut`:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Shortcut
+```
 
 ## Usage
 
-Run the root-level `SessionPurge.exe` as a standard user on Windows 10 or 11 x64 with .NET Framework 4.8. No installer, downloads, or package dependencies are required. The executable is unsigned.
+### Graphical interface
 
-1. Select Claude Code or Codex on every launch, then **Scan history**. Nothing scans automatically. Homes come from `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, with the corresponding user-profile directory as fallback. Production accepts only that configured home on a local NTFS volume.
-2. Browse project groups; search and filter by project, status, and age. Names start hidden. Enable **Show session names / prompt excerpts** to display and search them. Full conversation bodies and tool outputs stay hidden. Changing filters or name visibility clears selection.
-3. Select eligible sessions individually or with **Select visible**, then **Review deletion**. The preview lists each transcript and every shared file to update, record counts, and before/after sizes. Type `DELETE` and confirm within two minutes. At most 500 sessions can be selected.
+1. Choose **Claude Code** or **Codex**, then **Scan history**. Nothing is read
+   before you scan. The home is `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, otherwise
+   `%USERPROFILE%\.claude` or `%USERPROFILE%\.codex`.
+2. Search and filter by project, status and age. Each session is listed by its
+   title, with the project folder alongside. Clear **Show session names /
+   prompt excerpts** to hide titles from the list, the details pane and search;
+   the setting is kept when you switch providers. Conversation bodies and tool
+   output are never shown.
+3. Select eligible sessions (at most 500) and choose **Review deletion**. The
+   review lists every transcript and every file and folder deleted with it.
+   For direct deletion it also lists every shared history file that will
+   change, with record counts and sizes; for Codex CLI deletion it lists the
+   commands that will run.
+   A session that other sessions build on (subagents, forks, continued
+   conversations) can only be deleted together with them.
+4. Type `DELETE` and confirm within two minutes of opening the review.
+5. Rescan to see the result.
 
-Close possible provider hosts before scanning for deletion, including Codex, Claude, editor integrations, Node.js, and WSL. The app reports recognized running process names without inspecting command lines. This includes a Codex app being used to develop or discuss SessionPurge. Files modified within 15 minutes, or dated in the future, are also blocked. Close the hosts and rescan. Session details include home-level safety checks and specific storage blockers; a remaining unsupported-store message requires an adapter, not removal or relocation of real history.
+`Ctrl+F` focuses search and `F5` rescans.
 
-Wide windows show the session list and details together; compact windows provide Sessions/Session details navigation. `Ctrl+F` focuses search; `F5` rescans.
+### Session titles
 
-## Names
+Titles are chosen in this order, falling back to *Untitled session* when none
+exists:
 
-Labels never identify deletion targets: UUIDs and exact paths remain independent. Claude uses the latest matching custom title, provider title, summary linked to an owned message, then a meaningful user prompt. Codex uses the last matching append in `session_index.jsonl`, a matching inline title event, then a meaningful user prompt. Malformed or unowned labels fall back to **Untitled session** without inventing information.
+- **Claude Code:** the latest custom title, then the provider title or a summary
+  linked to the session, then the first meaningful user prompt.
+- **Codex:** the title in `session_index.jsonl`, then an inline title event, then
+  the subagent nickname, then the first meaningful user prompt.
 
-System/assistant messages, tool outputs, internal wrappers, commands, and flagged metadata are excluded from prompt naming. Labels are normalized, capped at 120 characters, and filtered for known credential-like patterns and deceptive controls. No filter recognizes every secret; enabling names can expose user-supplied text. Names, searches, contents, and usage are never saved.
+Titles are capped at 120 characters and filtered for credential-like text and
+control characters. No filter recognizes every secret.
 
-## Supported storage and safety
+## What deletion removes
 
-- Claude: `projects/<project>/<UUID>.jsonl`, stable `2.1.x` envelopes, verified session IDs and unique message IDs with a local parent chain. Recognized messages, ordinary tools, system/progress records, matching titles, owned summaries/snapshots, and scoped queue operations are supported. Unknown fields and record types fail closed.
-- Codex: dated `sessions/YYYY/MM/DD/rollout-<timestamp>-<UUID>.jsonl` and flat `archived_sessions` rollouts, stable `0.x.y` envelopes, verified first-record ownership, and recognized message/tool/reasoning/context/event records. Prereleases, linked/immutable rollouts, delegation, unknown schemas, and embedded compaction replacement history are unsupported. A version within these envelopes alone does not establish compatibility.
-- Shared JSON: Claude and Codex `history.jsonl`, Codex `session_index.jsonl`, and Claude `projects/<project>/sessions-index.json` version 1. Only records with an exact selected UUID are removed. Retained JSONL bytes are unchanged. Retained project-index values keep their original JSON tokens, including large integers; array formatting may change. Metadata-supplied paths are never followed, and contradictory project-index paths or sidechain ownership are refused.
-- Limits: complete UTF-8 JSONL without BOM or blank rows; 32 MiB per transcript/shared file, 1 MiB per JSON row or project-index document, 100,000 rows, and 20,000 history-tree entries. Structural previews show at most 200 records. The optional Codex naming index has an additional 8 MiB/20,000-row display limit.
+- **Claude Code:** the transcript `projects/<project>/<UUID>.jsonl`, its
+  `projects/<project>/<UUID>/` folder (subagent transcripts and tool results),
+  the per-session `file-history/<UUID>`, `session-env/<UUID>` and
+  `tasks/<UUID>` folders, and the matching records in `history.jsonl` and
+  `projects/<project>/sessions-index.json`. All of this happens in one
+  transactional NTFS operation; failure, cancellation or process termination
+  before commit changes nothing. Without shared history or session files,
+  transcripts are deleted one at a time.
+- **Codex with the Codex CLI installed:** each thread is deleted with
+  `codex delete --force <UUID>`, subagent threads first, which also removes
+  the records in Codex's own database and index. Before each command every
+  eligible rollout is checked again; after each command only that rollout and
+  its empty date folders may have disappeared. A final rescan confirms that the
+  remaining rollouts are byte-for-byte unchanged. Each command is separate, so
+  an interruption can leave part of a selection deleted.
+- **Codex without the CLI:** the rollout file and the matching records in
+  `history.jsonl` and `session_index.jsonl`, in one transactional NTFS
+  operation when those files exist. This is refused when Codex keeps thread data in SQLite.
 
-SQLite databases and sidecars, external `CODEX_SQLITE_HOME`, session-related directories, and other unrecognized layouts block deletion. These are preserved, not silently ignored. Authentication, settings, plugins, skills, and source-project contents are never opened. WSL, remote/cloud-only storage, Claude Desktop/Cowork, and cloud conversation deletion are unsupported. No filesystem operations follow paths embedded in conversation contents.
+Only records with a selected session ID are removed from shared history files.
+Other JSONL lines keep their exact bytes; retained Claude project-index entries
+keep their JSON text, although whitespace between entries may change.
 
-The app checks current-user ownership, canonical paths, NTFS identities, single hard-link counts, file types, permissions, sizes, timestamps, SHA-256 fingerprints, and directory inventories. Ancestor directories are pinned against rename. Reparse points, junctions, hard links, offline/special files, and read-only targets are refused. All transcripts and supported shared stores, including unselected peers, are locked and revalidated before mutation. Activity and inventories are checked again before commit. No administrator privileges or alternate deletion fallback is used.
+## Safety
 
-When supported shared files exist, transcript deletions and shared-record updates use one transactional NTFS operation. Failure, cancellation, or process termination before commit rolls back the selection. No application temporary file, backup, or recovery journal is created. Windows manages its own filesystem transaction journal. Microsoft discourages new reliance on transactional NTFS; support is conditional on Windows and the volume, and unavailability blocks the operation. There is no unsafe fallback. Without shared files, transcript unlinks are independent; interruption can leave a partially completed selection. Rescan before retrying.
+A session is blocked, with a specific reason, if it:
 
-Deletion bypasses the Recycle Bin. It is not forensic secure erasure and does not remove copies from backups, snapshots, cloud synchronization, Windows paging, crash handling, or OS-managed storage. Physical power-loss durability is untested. Activity checks cannot prove renamed/custom/hostile writers are absent or eliminate every cross-process race; close all writers. This app is not a security boundary against another process running as the same user.
+- is listed as running in Claude Code's `sessions/<pid>.json` with a live process
+- was modified in the last 15 minutes or is dated in the future
+- started subagents whose transcripts are not in its session folder
+- is a Claude session with a sidechain, fork, team or agent link, or with
+  messages that refer to another transcript
+- is built on by another session that is itself blocked
+- is split across several rollout files or shares its ID with another file
+- is named by another file in the history folders
 
-Runtime has no network requests, telemetry, updates, persistent settings, logs, caches, services, startup entries, or background process. Parsed history exists only in process memory.
+Some conditions block more than one session. In a Codex home, every session is
+blocked while any rollout header cannot be read; in a Claude project, every
+session is blocked while another transcript in that project cannot be read
+completely. Every Claude session is blocked if the running-session list cannot
+be read, and every Codex session is blocked if Codex keeps thread data in SQLite
+and no Codex CLI with a `delete` command is found.
 
-## Build and tests
+Before a direct deletion, every selected transcript, every other eligible
+transcript and every shared history file is locked and checked again against
+the scan: ownership, canonical path, NTFS file ID, a single hard link, no
+reparse points, size, timestamp and SHA-256. Links and junctions in the history
+folders block the whole home. Authentication, settings, plugins and skills are
+never opened, and paths found inside history are never followed.
 
-From the project directory, using the installed Windows x64 .NET Framework compiler:
+If a process such as `claude`, `codex`, `node` or a code editor is running, the
+scan and the review show a warning. The warning does not block deletion.
 
-```powershell
+SessionPurge writes no temporary files, backups, logs, settings or telemetry
+and makes no network connections. Codex deletion runs the installed Codex CLI,
+which is outside SessionPurge's control.
+
+## Limitations
+
+- Deletion bypasses the Recycle Bin and is not secure erasure. Copies in
+  backups, snapshots, sync folders, paging files or crash dumps remain.
+- Process checks cannot detect renamed or hostile writers. The app is not a
+  security boundary against other processes running as the same user.
+- Microsoft discourages new use of
+  [transactional NTFS](https://learn.microsoft.com/en-us/windows/win32/fileio/deprecation-of-txf);
+  if it is unavailable, deletions that need a transaction are refused.
+- SessionPurge cannot read Codex's SQLite databases; their records are removed
+  only by Codex's own command.
+- Not supported: WSL, remote or cloud-only storage, Claude Desktop and cloud
+  conversation deletion.
+- Provider storage formats can change without notice.
+
+## Development
+
+```
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
 ```
 
-The execution-policy override affects only that process. No downloads or restores occur. Omit `-Test` to build only. Source is in `src`, automated tests in `tests`, test binaries in `build`, and synthetic development output in `dev`. The portable application is built directly into the project root. Tests generate and clean isolated fixtures beneath `dev`; production has no synthetic-root or activity-bypass option. No actual provider history is used for development.
+`build.ps1` compiles with the Windows .NET Framework x64 compiler and treats
+warnings as errors. With `-Test` it also builds `build\SessionPurge.Tests.exe`
+and runs it against synthetic fixtures under `dev\`, which are removed
+afterwards. Test windows stay off-screen, out of the taskbar and are never
+activated; the Codex CLI is replaced by a stub. Cases the environment cannot
+run, such as symbolic links without the required privilege, are reported under
+`UNAVAILABLE CASES`.
 
-Executed in the development environment: **68 passed, 0 failed, 2 unavailable**. Tests cover deletion and unrelated-data preservation; malformed/unknown formats; ownership and metadata contradictions; active-session gates; peer locks, content/identity changes, and inventory races; transactional failure/cancellation/process-termination rollback and retry; hard links and junctions; naming/privacy; responsive GUI interactions; confirmation expiry; and loading/rendering the root production executable.
+The window follows the Windows high-contrast setting and uses system colors
+when it is on.
 
-ACL-denial fixture setup was denied by the execution environment. Symbolic-link creation returned privilege error 1314 with both attempted flag combinations. Those two scenarios remain unverified. Foreign-owner rejection, physical power loss, other Windows versions, and real provider histories were not tested.
+Source layout:
 
-Independent source review identified and corrected contradictory project-index ownership, namespaced delegation checks, and false rejection of nameless Codex reasoning/tool-output records. Earlier review corrected an unselected-peer mutation gap. Regression tests cover the corrections.
-
-Format references: [Claude session storage](https://code.claude.com/docs/en/sessions#where-transcripts-are-stored), [Claude session metadata parser](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py), [Codex rollout recorder](https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs), [Codex session index](https://github.com/openai/codex/blob/main/codex-rs/rollout/src/session_index.rs), [Codex SQLite state](https://github.com/openai/codex/blob/main/codex-rs/state/src/lib.rs), and [Windows transactional NTFS limitations](https://learn.microsoft.com/en-us/windows/win32/fileio/deprecation-of-txf). Provider internals can change without a stable storage API.
+- `src/` the application: history scanning, deletion engine and windows
+- `tests/` the test runner and test cases
+- `assets/` the application icon
