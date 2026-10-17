@@ -166,8 +166,12 @@ namespace SessionPurge.Tests
                 var toggle = Find<CheckBox>(window, "showNames");
                 var grid = Find<DataGridView>(window, "sessions");
                 var details = Find<TextBox>(window, "details");
-                Assert(!toggle.Checked && !grid.Columns["Name"].Visible, "Names visible by default.");
-                window.SetSearch("dashboard"); Assert(window.VisibleSessions == 0, "Hidden names leaked through search.");
+                var title = grid.Columns["Name"];
+                Assert(toggle.Checked && title.Visible && title.HeaderText == "Session" && title.DisplayIndex == 1 && grid.Columns["Project"].DisplayIndex == 2, "Session titles are not shown first by default.");
+                var titled = grid.Rows.Cast<DataGridViewRow>().First(r => ((SessionRecord)r.Tag).Id == A);
+                Assert(Convert.ToString(titled.Cells["Name"].Value) == "Improve dashboard navigation" && Convert.ToString(titled.Cells["Project"].Value) != Convert.ToString(titled.Cells["Name"].Value), "The project path was shown instead of the session title.");
+                Assert(grid.Rows.Cast<DataGridViewRow>().Any(r => Convert.ToString(r.Cells["Name"].Value) == "Untitled session"), "A session without a title lost its fallback name.");
+                toggle.Checked = false; window.SetSearch("dashboard"); Assert(window.VisibleSessions == 0, "Hidden names leaked through search.");
                 toggle.Checked = true; Assert(window.VisibleSessions == 1 && grid.Columns["Name"].Visible, "Name search did not find the prompt.");
                 window.SetSearch("");
                 var row = grid.Rows.Cast<DataGridViewRow>().First(r => ((SessionRecord)r.Tag).Id == A);
@@ -193,6 +197,9 @@ namespace SessionPurge.Tests
                 window.Size = standard; toggle.Checked = true; Application.DoEvents();
                 Assert(!unclamped || !grid.Controls.OfType<HScrollBar>().Any(bar => bar.Visible), "Session columns need horizontal scrolling at the default size.");
                 Render(window);
+                toggle.Checked = false;
+                Find<ComboBox>(window, "providers").SelectedIndex = 1;
+                Assert(!toggle.Checked && !grid.Columns["Name"].Visible, "Switching providers showed names again after they were hidden.");
                 window.Close();
             }
             DateTime now = Now;

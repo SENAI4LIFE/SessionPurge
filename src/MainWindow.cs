@@ -22,7 +22,7 @@ namespace SessionPurge
         private readonly ComboBox project = Choice("project", "Project", "All projects");
         private readonly ComboBox statusFilter = Choice("statusFilter", "Status", "All sessions", "Eligible only", "Blocked only");
         private readonly ComboBox age = Choice("age", "Last modified", "Any age", "Older than 7 days", "Older than 30 days", "Older than 90 days");
-        private readonly CheckBox showNames = new CheckBox { Name = "showNames", AccessibleName = "Show session names", Text = "Show session names / prompt excerpts", AutoSize = true };
+        private readonly CheckBox showNames = new CheckBox { Name = "showNames", AccessibleName = "Show session names", Text = "Show session names / prompt excerpts", AutoSize = true, Checked = true };
         private readonly DataGridView sessions = new DataGridView { Name = "sessions", AccessibleName = "Sessions" };
         private readonly TextBox details = new TextBox { Name = "details", AccessibleName = "Session details", Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
         private readonly SplitContainer split = new SplitContainer { Name = "split", Dock = DockStyle.Fill };
@@ -111,12 +111,12 @@ namespace SessionPurge
             sessions.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             sessions.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Select", HeaderText = "Select", AutoSizeMode = DataGridViewAutoSizeColumnMode.ColumnHeader });
             sessions.Columns.Add(Column("Project", "Project", 40));
-            sessions.Columns.Add(Column("Name", "Name", 60));
+            sessions.Columns.Add(Column("Name", "Session", 60));
             sessions.Columns.Add(Column("Id", "Session ID", 0));
             sessions.Columns.Add(Column("Modified", "Modified", 0));
             sessions.Columns.Add(Column("Size", "Size", 0));
             sessions.Columns.Add(Column("Status", "Status", 0));
-            sessions.Columns["Name"].Visible = false;
+            sessions.Columns["Name"].DisplayIndex = 1;
             foreach (DataGridViewColumn column in sessions.Columns) column.SortMode = DataGridViewColumnSortMode.NotSortable;
             sessions.CurrentCellDirtyStateChanged += delegate { if (sessions.IsCurrentCellDirty) sessions.CommitEdit(DataGridViewDataErrorContexts.Commit); };
             sessions.CellValueChanged += delegate(object sender, DataGridViewCellEventArgs e)
@@ -136,7 +136,7 @@ namespace SessionPurge
         {
             provider = choice;
             root.Text = HistoryEngine.ConfiguredHome(choice);
-            changing = true; search.Clear(); showNames.Checked = false; statusFilter.SelectedIndex = 0; age.SelectedIndex = 0; changing = false;
+            changing = true; search.Clear(); statusFilter.SelectedIndex = 0; age.SelectedIndex = 0; changing = false;
             ResetCatalog();
             scan.Enabled = true;
             status.Text = "Ready to scan " + (choice == Provider.Claude ? "Claude Code" : "Codex") + ". No history has been read yet.";
