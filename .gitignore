@@ -1,7 +1,13 @@
 /build/
 /dev/
 /dist/
+/bin/
+/obj/
+/.vs/
+/.review/
 /SessionPurge.exe
 *.pdb
 *.user
 *.suo
+Thumbs.db
+desktop.ini
