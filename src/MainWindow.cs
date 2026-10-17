@@ -70,6 +70,7 @@ namespace SessionPurge
             layout.Controls.Add(Bar(2, select, clear, selection, purge), 0, 3);
             layout.Controls.Add(status, 0, 4);
             Controls.Add(layout);
+            Theme.Apply(this, SystemInformation.HighContrast, scan, purge);
             providers.SelectedIndexChanged += delegate { if (providers.SelectedIndex >= 0) Choose(providers.SelectedIndex == 0 ? Provider.Claude : Provider.Codex); };
             scan.Click += async delegate { await ScanAsync(); };
             cancel.Click += delegate { if (cancellation != null) cancellation.Cancel(); };

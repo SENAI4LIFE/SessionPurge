@@ -37,6 +37,7 @@ namespace SessionPurge
             layout.Controls.Add(MainWindow.Bar(1, new Label { Text = "Type DELETE to confirm", AutoSize = true }, confirmation), 0, 2);
             layout.Controls.Add(MainWindow.Bar(0, state, cancel, remove), 0, 3);
             Controls.Add(layout);
+            Theme.Apply(this, SystemInformation.HighContrast, null, remove);
             AcceptButton = cancel;
             CancelButton = cancel;
             confirmation.TextChanged += delegate { Recheck(); };
