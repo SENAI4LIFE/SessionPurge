@@ -11,3 +11,11 @@
 *.suo
 Thumbs.db
 desktop.ini
+/review.md
+/.claude/
+/.codex/
+CLAUDE.md
+AGENTS.md
+.env
+.vscode/
+*.lnk
