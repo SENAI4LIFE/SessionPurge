@@ -1,0 +1,7 @@
+/build/
+/dev/
+/dist/
+/SessionPurge.exe
+*.pdb
+*.user
+*.suo
