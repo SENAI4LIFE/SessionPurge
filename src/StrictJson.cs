@@ -7,6 +7,7 @@ namespace SessionPurge
 {
     internal sealed class StrictJson
     {
+        internal static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
         private readonly string text;
         private int position;
         private StrictJson(string value) { text = value; }
@@ -130,6 +131,10 @@ namespace SessionPurge
         {
             object result;
             return value.TryGetValue(key, out result) ? result as Dictionary<string, object> : null;
+        }
+        internal static bool Time(Dictionary<string, object> value, string key, out DateTimeOffset time)
+        {
+            return DateTimeOffset.TryParse(Text(value, key), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out time);
         }
     }
 }

@@ -18,6 +18,7 @@ namespace SessionPurge
         private string customTitle;
         private string providerTitle;
         private string firstPrompt;
+        private string nickname;
         private bool identity;
         private bool uncertain;
         private static readonly Regex Sensitive = new Regex(@"(?i)(secret|password|passwd|credential|authorization|bearer\s|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|private[_ -]?key|sk-[a-z0-9_-]{8}|gh[pousr]_[a-z0-9]|github_pat_|AKIA[A-Z0-9]|-----BEGIN|[a-z0-9+/=_-]{40,}|https?://[^\s/]*@)", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
@@ -57,9 +58,9 @@ namespace SessionPurge
             if (payload == null) return;
             if (ordinal == 1)
             {
-                string source = StrictJson.Text(payload, "source");
-                identity = type == "session_meta" && string.Equals(StrictJson.Text(payload, "id"), id, StringComparison.OrdinalIgnoreCase) && (source == "cli" || source == "vscode");
+                identity = type == "session_meta" && string.Equals(StrictJson.Text(payload, "id"), id, StringComparison.OrdinalIgnoreCase);
                 if (!identity) uncertain = true;
+                else nickname = Label(StrictJson.Text(payload, "agent_nickname"));
                 return;
             }
             if (type == "session_meta") { uncertain = true; return; }
@@ -102,8 +103,8 @@ namespace SessionPurge
             if (!session.NameIdentityVerified) return;
             string summary = null;
             foreach (var value in summaries) if (messageIds.Contains(value.Key)) summary = value.Value;
-            session.Name = customTitle ?? providerTitle ?? summary ?? firstPrompt ?? "Untitled session";
-            session.NameSource = customTitle != null ? "Custom title" : providerTitle != null ? "Provider title" : summary != null ? "Conversation summary" : firstPrompt != null ? "First user prompt" : "No usable title or user prompt";
+            session.Name = customTitle ?? providerTitle ?? summary ?? nickname ?? firstPrompt ?? "Untitled session";
+            session.NameSource = customTitle != null ? "Custom title" : providerTitle != null ? "Provider title" : summary != null ? "Conversation summary" : nickname != null ? "Subagent nickname" : firstPrompt != null ? "First user prompt" : "No usable title or user prompt";
         }
         internal static string Label(string value)
         {
@@ -138,12 +139,10 @@ namespace SessionPurge
                 using (var file = new LockedFile(path, false))
                 {
                     if (file.Length == 0 || file.Length > 8 * 1024 * 1024) throw new SafetyException("Unsupported name index size.");
-                    var bytes = new byte[(int)file.Length];
+                    var bytes = file.ReadAll(cancellation);
                     try
                     {
-                        int offset = 0;
-                        while (offset < bytes.Length) { cancellation.ThrowIfCancellationRequested(); int read = file.Stream.Read(bytes, offset, bytes.Length - offset); if (read == 0) throw new SafetyException("Name index changed."); offset += read; }
-                        string text = new UTF8Encoding(false, true).GetString(bytes);
+                        string text = StrictJson.Utf8.GetString(bytes);
                         if (text[0] == '\ufeff' || text[text.Length - 1] != '\n') throw new SafetyException("Incomplete name index.");
                         var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                         using (var reader = new StringReader(text))
@@ -156,9 +155,7 @@ namespace SessionPurge
                                 if (++rows > 20000) throw new SafetyException("Name index limit exceeded.");
                                 var row = StrictJson.Parse(line);
                                 string owner = StrictJson.Text(row, "id");
-                                DateTimeOffset updated;
-                                if (!HistoryReader.IsUuid(owner) || row.Keys.Any(k => k != "id" && k != "thread_name" && k != "updated_at") || !DateTimeOffset.TryParse(StrictJson.Text(row, "updated_at"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out updated)) throw new SafetyException("Unknown name index schema.");
-                                names[owner] = Label(StrictJson.Text(row, "thread_name"));
+                                if (HistoryReader.IsUuid(owner)) names[owner] = Label(StrictJson.Text(row, "thread_name"));
                             }
                         }
                         foreach (var session in catalog.Sessions)
@@ -172,6 +169,13 @@ namespace SessionPurge
             }
             catch (OperationCanceledException) { throw; }
             catch { catalog.Notices.Add("Session-name index unavailable or unsupported; transcript labels were used. Shared metadata remains unchanged."); }
+        }
+        internal static string SafeText(string value)
+        {
+            if (value == null) return "Unknown";
+            var result = new StringBuilder();
+            foreach (char c in value) if (!char.IsControl(c) && c != '‪' && c != '‫' && c != '‭' && c != '‮' && c != '‬' && (c < '⁦' || c > '⁩')) result.Append(c);
+            return result.Length > 240 ? result.ToString(0, 240) : result.ToString();
         }
     }
 }

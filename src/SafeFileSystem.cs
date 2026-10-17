@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 [assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
@@ -90,9 +91,7 @@ namespace SessionPurge
         internal readonly string Identity;
         internal readonly long Length;
         internal readonly DateTime Modified;
-        internal LockedFile(string path, bool deletion)
-            : this(path, deletion, null, false) { }
-        internal LockedFile(string path, bool deletion, FileTransaction transaction, bool writing)
+        internal LockedFile(string path, bool deletion, FileTransaction transaction = null, bool writing = false)
         {
             Handle = SafeFileSystem.Open(path, false, deletion, true, transaction, writing);
             try
@@ -111,10 +110,32 @@ namespace SessionPurge
             Stream.Position = 0;
             using (var hash = SHA256.Create()) { string result = Convert.ToBase64String(hash.ComputeHash(Stream)); Stream.Position = 0; return result; }
         }
+        internal bool Matches(string identity, long length, DateTime modified, string fingerprint)
+        {
+            return Identity == identity && Length == length && Modified == modified && Hash() == fingerprint;
+        }
+        internal byte[] ReadAll(CancellationToken cancellation)
+        {
+            var bytes = new byte[(int)Length];
+            try
+            {
+                Stream.Position = 0;
+                int offset = 0;
+                while (offset < bytes.Length)
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    int read = Stream.Read(bytes, offset, bytes.Length - offset);
+                    if (read == 0) throw new SafetyException("A file changed while it was being read.");
+                    offset += read;
+                }
+                return bytes;
+            }
+            catch { Array.Clear(bytes, 0, bytes.Length); throw; }
+            finally { Stream.Position = 0; }
+        }
         internal void Delete()
         {
-            int disposition = 1;
-            if (!Native.SetFileInformationByHandle(Handle, 4, ref disposition, 4)) throw new SafetyException("Windows refused deletion; no fallback was attempted.");
+            SafeFileSystem.MarkDeleted(Handle);
             Dispose();
         }
         public void Dispose() { if (Stream != null) Stream.Dispose(); Handle.Dispose(); }
@@ -148,9 +169,7 @@ namespace SessionPurge
             string stem = part.Split('.')[0].ToUpperInvariant();
             if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || (stem.Length == 4 && (stem.StartsWith("COM") || stem.StartsWith("LPT")) && stem[3] >= '1' && stem[3] <= '9')) throw new SafetyException("Reserved Windows path component.");
         }
-        internal static SafeFileHandle Open(string path, bool directory, bool deletion, bool requireOwner)
-        { return Open(path, directory, deletion, requireOwner, null, false); }
-        internal static SafeFileHandle Open(string path, bool directory, bool deletion, bool requireOwner, FileTransaction transaction, bool writing)
+        internal static SafeFileHandle Open(string path, bool directory, bool deletion, bool requireOwner, FileTransaction transaction = null, bool writing = false)
         {
             uint access = directory ? 0x20001u : 0x80020000u;
             if (deletion) access |= 0x10000;
@@ -175,6 +194,11 @@ namespace SessionPurge
             }
             catch { handle.Dispose(); throw; }
         }
+        internal static void MarkDeleted(SafeFileHandle handle)
+        {
+            int disposition = 1;
+            if (!Native.SetFileInformationByHandle(handle, 4, ref disposition, 4)) throw new SafetyException("Windows refused deletion; no fallback was attempted.");
+        }
         private static void CheckOwner(SafeFileHandle handle)
         {
             IntPtr owner, group, dacl, sacl, descriptor;
@@ -187,13 +211,6 @@ namespace SessionPurge
                 }
             }
             finally { if (descriptor != IntPtr.Zero) Native.LocalFree(descriptor); }
-        }
-        internal static string SafeText(string value)
-        {
-            if (value == null) return "Unknown";
-            var result = new StringBuilder();
-            foreach (char c in value) if (!char.IsControl(c) && c != '\u202a' && c != '\u202b' && c != '\u202d' && c != '\u202e' && c != '\u202c' && (c < '\u2066' || c > '\u2069')) result.Append(c);
-            return result.Length > 240 ? result.ToString(0, 240) : result.ToString();
         }
     }
 }

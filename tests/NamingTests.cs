@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace SessionPurge.Tests
@@ -72,8 +71,8 @@ namespace SessionPurge.Tests
         {
             var old = Named(Provider.Claude, ClaudePrompt(A, "Review build configuration"));
             Assert(old.Eligible && old.Name == "Review build configuration", "Existing safe profile regressed.");
-            var unsupported = Named(Provider.Claude, ClaudePrompt(A, "Review build configuration").Replace("2.1.32", "9.0.0"));
-            Assert(!unsupported.Eligible && unsupported.Name == old.Name, "Display adapter affected version safety.");
+            var unsupported = Named(Provider.Claude, ClaudePrompt(A, "Review build configuration").Replace("\"isSidechain\":false", "\"isSidechain\":false,\"forkedFrom\":{\"sessionId\":\"" + B + "\"}"));
+            Assert(!unsupported.Eligible && unsupported.Name == old.Name, "Display adapter affected link safety.");
             string home = Home(); Codex(home, A, false); File.WriteAllText(Path.Combine(home, "session_index.jsonl"), IndexLine(A, "Build investigation"));
             var catalog = Scan(home, Provider.Codex);
             Assert(catalog.Sessions.Single().Name == "Build investigation" && catalog.Sessions.Single().Eligible, "Verified index should be supported.");
@@ -99,7 +98,10 @@ namespace SessionPurge.Tests
         }
         private static void InvalidNameIndex()
         {
-            foreach (string text in new[] { IndexLine(A, "Earlier valid title") + "{broken}\n", IndexLine(A, "Injected").TrimEnd('\n'), IndexLine(A, "Injected").Replace("\"updated_at\"", "\"path\""), "\ufeff" + IndexLine(A, "Injected"), IndexLine(A, "Injected").Replace("\"thread_name\"", "\"id\"") })
+            string tolerant = Home(); Codex(tolerant, A, false); WriteStore(tolerant, "session_index.jsonl", IndexLine(A, "Index title with new fields").Replace("\"updated_at\"", "\"future_field\":1,\"path\""));
+            var named = Scan(tolerant, Provider.Codex).Sessions.Single();
+            Assert(named.Eligible && named.Name == "Index title with new fields", "Index rows with unfamiliar fields were not tolerated.");
+            foreach (string text in new[] { IndexLine(A, "Earlier valid title") + "{broken}\n", IndexLine(A, "Injected").TrimEnd('\n'), "\ufeff" + IndexLine(A, "Injected"), IndexLine(A, "Injected").Replace("\"thread_name\"", "\"id\"") })
             {
                 string home = Home(); Put(home, Provider.Codex, A, CodexText(A).Replace(Quote(Body), Quote("Original user request")), false);
                 string path = Path.Combine(home, "session_index.jsonl"); File.WriteAllText(path, text, new UTF8Encoding(false));
@@ -141,7 +143,7 @@ namespace SessionPurge.Tests
         {
             string home = Home(); Put(home, Provider.Claude, A, ClaudePrompt(A, "A valid request") + Title("custom-title", "customTitle", A, "A private label") + "{broken}\n", false);
             var session = Scan(home, Provider.Claude).Sessions.Single();
-            Assert(!session.Eligible && session.Name == "Untitled session", "Partial parse exposed an unverified label.");
+            Assert(!session.Eligible && session.Blocked.Contains("could not be read") && session.Name == "A private label", "Unreadable record hid verified titles or allowed deletion.");
         }
         private static void NamingDoesNotReadCredentials()
         {
@@ -152,67 +154,67 @@ namespace SessionPurge.Tests
                 Assert(Scan(home, Provider.Codex).Sessions.Single().Eligible, "Naming tried to open unrelated private files.");
             Assert(File.ReadAllText(auth) == Body && File.ReadAllText(settings) == Body, "Private fixture files changed.");
         }
-        private static void WaitUi(Task task)
-        {
-            var deadline = DateTime.UtcNow.AddSeconds(15);
-            while (!task.IsCompleted && DateTime.UtcNow < deadline) { Application.DoEvents(); Thread.Sleep(5); }
-            Assert(task.IsCompleted, "UI operation timed out."); task.GetAwaiter().GetResult(); Application.DoEvents();
-        }
         private static void GuiNamesAndLayout()
         {
             string home = Home(); Put(home, Provider.Claude, A, ClaudePrompt(A, "Improve dashboard navigation"), false); Claude(home, B);
             using (var window = new MainWindow(Engine))
             {
-                window.Show(); WaitUi(window.ScanFixture(Provider.Claude, home));
-                var controls = AllControls(window).ToList();
-                var toggle = (CheckBox)controls.Single(c => c.AccessibleName == "Show session names");
-                Assert(!toggle.Checked, "Names visible by default.");
+                ShowHidden(window); Await(window.ScanFixture(Provider.Claude, home));
+                Size standard = window.Size;
+                Size minimum = window.MinimumSize;
+                Assert(Screen.AllScreens.Any(s => minimum.Width <= s.WorkingArea.Width && minimum.Height <= s.WorkingArea.Height && standard.Width <= s.WorkingArea.Width && standard.Height <= s.WorkingArea.Height), "Window does not fit a screen work area.");
+                var toggle = Find<CheckBox>(window, "showNames");
+                var grid = Find<DataGridView>(window, "sessions");
+                var details = Find<TextBox>(window, "details");
+                Assert(!toggle.Checked && !grid.Columns["Name"].Visible, "Names visible by default.");
                 window.SetSearch("dashboard"); Assert(window.VisibleSessions == 0, "Hidden names leaked through search.");
-                toggle.Checked = true; Assert(window.VisibleSessions == 1, "Name search did not find the prompt.");
+                toggle.Checked = true; Assert(window.VisibleSessions == 1 && grid.Columns["Name"].Visible, "Name search did not find the prompt.");
                 window.SetSearch("");
-                var grid = (DataGridView)controls.Single(c => c is DataGridView);
-                var row = grid.Rows.Cast<DataGridViewRow>().First(r => r.Tag is SessionRecord && ((SessionRecord)r.Tag).Id == A);
-                grid.CurrentCell = row.Cells[1]; Application.DoEvents();
-                Assert(controls.Single(c => c.AccessibleName == "Session detail title").Text == "Improve dashboard navigation", "Detail title did not reflect the selected name.");
+                var row = grid.Rows.Cast<DataGridViewRow>().First(r => ((SessionRecord)r.Tag).Id == A);
+                grid.CurrentCell = row.Cells["Id"]; Application.DoEvents();
+                Assert(details.Text.StartsWith("Improve dashboard navigation"), "Details did not show the selected name.");
                 toggle.Checked = false;
-                Assert(!controls.Any(c => c.Text.Contains("Improve dashboard navigation")), "Hiding names left a title visible.");
-                var split = (SplitContainer)controls.Single(c => c is SplitContainer);
-                window.Size = new Size(1360, 920); Application.DoEvents();
-                Assert(split.Orientation == Orientation.Vertical && split.Panel1.Width >= 650, "Wide layout hides list columns.");
-                window.Size = new Size(980, 850); Application.DoEvents();
-                var detailTab = (Button)controls.Single(c => c is Button && c.Text == "Session details");
-                var listTab = (Button)controls.Single(c => c is Button && c.Text == "Sessions");
-                Assert(detailTab.Visible && listTab.Visible && grid.Visible && grid.Height > 130, "Compact session navigation is unusable.");
-                detailTab.PerformClick(); Application.DoEvents();
-                Assert(!grid.Visible && controls.Single(c => c.AccessibleName == "Session file details").Visible, "Compact detail navigation failed.");
-                listTab.PerformClick(); Application.DoEvents(); Assert(grid.Visible, "Compact list navigation failed.");
-                window.Size = new Size(900, 760); Application.DoEvents(); Assert(grid.Visible && grid.Height >= 130, "Minimum-size session list cannot show a row.");
-                AssertFits(controls.Single(c => c.AccessibleName == "Provider home directory"));
-                AssertFits(controls.Single(c => c is Button && c.Text == "Review deletion"));
-                using (var compact = new Bitmap(window.Width, window.Height)) { window.DrawToBitmap(compact, new Rectangle(0, 0, window.Width, window.Height)); compact.Save(Path.Combine(Path.GetDirectoryName(work), "synthetic-ui-compact.png")); }
-                window.Size = new Size(1360, 920); Application.DoEvents();
-                toggle.Checked = true;
-                AssertFits(controls.Single(c => c.AccessibleName == "Provider home directory"));
-                using (var image = new Bitmap(window.Width, window.Height)) { window.DrawToBitmap(image, new Rectangle(0, 0, window.Width, window.Height)); image.Save(Path.Combine(Path.GetDirectoryName(work), "synthetic-ui-names.png")); }
+                Assert(!AllControls(window).Any(c => c.Text.Contains("Improve dashboard navigation")), "Hiding names left a title visible.");
+                Assert(!grid.Rows.Cast<DataGridViewRow>().SelectMany(r => r.Cells.Cast<DataGridViewCell>()).Any(c => Convert.ToString(c.Value).Contains("Improve dashboard navigation")), "Hiding names left a title in the list.");
+                string[] essential = { "providers", "home", "scan", "cancel", "search", "age", "showNames", "selectVisible", "reviewDeletion", "status" };
+                bool unclamped = window.MinimumSize == window.LogicalToDeviceUnits(new Size(960, 600)) && standard == window.LogicalToDeviceUnits(new Size(1280, 820));
+                foreach (Size size in new[] { standard, window.MinimumSize })
+                {
+                    window.Size = size; Application.DoEvents();
+                    Assert(grid.Visible && details.Visible && grid.Height >= 130 && grid.Width >= 400 && details.Width >= 200, "Session list or details unusable at " + size + ".");
+                    Assert(!unclamped || !window.HorizontalScroll.Visible && !window.VerticalScroll.Visible, "Window scrolls at " + size + ".");
+                    foreach (string name in essential) AssertFits(Find<Control>(window, name));
+                    Render(window);
+                }
+                window.MinimumSize = Size.Empty;
+                window.Size = window.LogicalToDeviceUnits(new Size(640, 360)); Application.DoEvents();
+                Assert(window.HorizontalScroll.Visible && window.VerticalScroll.Visible, "A small screen cannot scroll to every control.");
+                foreach (string name in essential) AssertFits(Find<Control>(window, name), Find<TableLayoutPanel>(window, "layout"));
+                window.Size = standard; toggle.Checked = true; Application.DoEvents();
+                Assert(!unclamped || !grid.Controls.OfType<HScrollBar>().Any(bar => bar.Visible), "Session columns need horizontal scrolling at the default size.");
+                Render(window);
                 window.Close();
             }
-            var plan = Plan(Scan(home, Provider.Claude), A);
-            using (var dialog = new ConfirmWindow(plan))
+            DateTime now = Now;
+            var engine = new HistoryEngine(delegate { return null; }, delegate { return now; });
+            var catalog = engine.Scan(Provider.Claude, home, CancellationToken.None);
+            var plan = engine.Plan(catalog, catalog.Sessions.Where(s => s.Id == A));
+            using (var dialog = new ConfirmWindow(plan, engine.Clock))
             {
-                dialog.Show(); Application.DoEvents();
-                var controls = AllControls(dialog).ToList();
-                ((TextBox)controls.Single(c => c.AccessibleName == "Type DELETE to confirm")).Text = "DELETE";
-                var remove = controls.Single(c => c is Button && c.Text == "Delete permanently"); Assert(remove.Enabled, "Valid confirmation disabled.");
-                plan.Expires = DateTime.UtcNow.AddSeconds(-1);
-                var deadline = DateTime.UtcNow.AddSeconds(2);
-                while (remove.Enabled && DateTime.UtcNow < deadline) { Application.DoEvents(); Thread.Sleep(5); }
-                Assert(!remove.Enabled, "Expired confirmation remains enabled."); dialog.Close();
+                ShowHidden(dialog);
+                var input = Find<TextBox>(dialog, "confirmation");
+                var remove = Find<Button>(dialog, "deletePermanently");
+                input.Text = "DELETE"; Assert(remove.Enabled, "Valid confirmation disabled.");
+                now = plan.Expires; input.Text = ""; input.Text = "DELETE"; Assert(remove.Enabled, "Confirmation disabled before expiry.");
+                now = plan.Expires.AddTicks(1);
+                Pump(() => !remove.Enabled);
+                dialog.Close();
             }
         }
-        private static void AssertFits(Control control)
+        private static void AssertFits(Control control, Control boundary = null)
         {
             Rectangle bounds = control.RectangleToScreen(control.ClientRectangle);
-            for (Control parent = control.Parent; parent != null; parent = parent.Parent)
+            for (Control parent = control.Parent; parent != null; parent = parent == boundary ? null : parent.Parent)
             {
                 Rectangle area = parent.RectangleToScreen(parent.ClientRectangle);
                 Assert(bounds.Top >= area.Top && bounds.Bottom <= area.Bottom && bounds.Left >= area.Left && bounds.Right <= area.Right, "A visible control is clipped by its parent.");
