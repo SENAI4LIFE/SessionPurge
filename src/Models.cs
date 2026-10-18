@@ -84,7 +84,6 @@ namespace SessionPurge
         internal Catalog Catalog;
         internal List<SessionRecord> Sessions;
         internal DateTime Expires;
-        internal string Warning;
         internal bool ViaCodex;
         internal List<ArtifactFile> Artifacts = new List<ArtifactFile>();
         internal List<StoreEdit> StoreEdits = new List<StoreEdit>();
@@ -94,7 +93,6 @@ namespace SessionPurge
         internal string Describe()
         {
             var lines = new List<string>();
-            if (Warning != null) { lines.Add(Warning); lines.Add(""); }
             lines.Add("Transcripts to delete:");
             lines.AddRange(Sessions.Select(s => "  " + s.RelativePath + "  (" + s.Bytes.ToString("N0") + " bytes)"));
             if (Artifacts.Count > 0)

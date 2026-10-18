@@ -132,8 +132,13 @@ reparse points, size, timestamp and SHA-256. Links and junctions in the history
 folders block the whole home. Authentication, settings, plugins and skills are
 never opened, and paths found inside history are never followed.
 
-If a process such as `claude`, `codex`, `node` or a code editor is running, the
-scan and the review show a warning. The warning does not block deletion.
+When a review is created, and again just before deletion, SessionPurge asks
+Windows Restart Manager which processes have a selected transcript, a file in
+its session folders, or a shared history file open. SessionPurge's own process
+is not counted. Each affected session is blocked with the process name and PID,
+and nothing is deleted; an open shared history file affects every selected
+session. If Restart Manager cannot complete the check, the affected sessions
+are blocked with the Windows error code. Rescan after closing the process.
 
 SessionPurge writes no temporary files, backups, logs, settings or telemetry
 and makes no network connections. Codex deletion runs the installed Codex CLI,
@@ -143,8 +148,11 @@ which is outside SessionPurge's control.
 
 - Deletion bypasses the Recycle Bin and is not secure erasure. Copies in
   backups, snapshots, sync folders, paging files or crash dumps remain.
-- Process checks cannot detect renamed or hostile writers. The app is not a
-  security boundary against other processes running as the same user.
+- Restart Manager sees only files that are open at the moment of the check. A
+  process that opens a file and closes it again, or opens one after the final
+  check, is not detected, and processes of other users may not be listed. The
+  app is not a security boundary against other processes running as the same
+  user.
 - Microsoft discourages new use of
   [transactional NTFS](https://learn.microsoft.com/en-us/windows/win32/fileio/deprecation-of-txf);
   if it is unavailable, deletions that need a transaction are refused.

@@ -268,7 +268,7 @@ namespace SessionPurge
                 details.Text = result.Describe();
                 status.Text = result.Stopped == null ? "Deletion complete. Rescan to see the current history." : "Deletion stopped. Some selected files may remain; rescan before retrying.";
             }
-            catch (Exception exception) { status.Text = HistoryEngine.Reason(exception); }
+            catch (Exception exception) { Populate(); status.Text = HistoryEngine.Reason(exception); }
             finally { SetBusy(false); }
         }
         internal static string FormatBytes(long bytes)

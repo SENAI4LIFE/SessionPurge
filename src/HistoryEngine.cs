@@ -10,28 +10,6 @@ using System.Threading;
 
 namespace SessionPurge
 {
-    internal static class ActivityGuard
-    {
-        internal static string Check()
-        {
-            var blocked = new HashSet<string>(new[] { "claude", "claude-code", "codex", "chatgpt", "node", "code", "code - insiders", "cursor", "windsurf", "wsl", "wslhost", "ubuntu", "debian", "bash", "zed", "idea64", "rider64", "jetbrains_client" }, StringComparer.OrdinalIgnoreCase);
-            Process[] processes = null;
-            try
-            {
-                processes = Process.GetProcesses();
-                var hosts = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var process in processes)
-                {
-                    string name = process.ProcessName;
-                    if (blocked.Contains(name)) hosts.Add(name.ToLowerInvariant());
-                }
-                return hosts.Count == 0 ? null : "Warning: possible provider hosts are running (" + string.Join(", ", hosts.ToArray()) + "). Sessions they are writing are blocked; close them before deleting if you can.";
-            }
-            catch { return "Warning: running processes could not be checked."; }
-            finally { if (processes != null) foreach (var process in processes) process.Dispose(); }
-        }
-    }
-
     internal static class CodexCli
     {
         internal static string Locate()
@@ -83,13 +61,13 @@ namespace SessionPurge
 
     internal sealed class HistoryEngine
     {
-        private readonly Func<string> activity;
+        private readonly Func<IEnumerable<string>, string> openBy;
         private readonly bool configuredHomesOnly;
         private readonly Func<bool> codexAvailable;
         private readonly Func<string, string> codexDelete;
         internal readonly Func<DateTime> Clock;
-        internal HistoryEngine() { activity = ActivityGuard.Check; Clock = () => DateTime.UtcNow; configuredHomesOnly = true; codexAvailable = () => CodexCli.Locate() != null; codexDelete = CodexCli.Delete; }
-        internal HistoryEngine(Func<string> guard, Func<DateTime> clock, Func<string, string> codex = null) { activity = guard; Clock = clock; configuredHomesOnly = false; codexAvailable = () => codex != null; codexDelete = codex; }
+        internal HistoryEngine() { openBy = OpenFiles.Check; Clock = () => DateTime.UtcNow; configuredHomesOnly = true; codexAvailable = () => CodexCli.Locate() != null; codexDelete = CodexCli.Delete; }
+        internal HistoryEngine(Func<IEnumerable<string>, string> open, Func<DateTime> clock, Func<string, string> codex = null) { openBy = open; Clock = clock; configuredHomesOnly = false; codexAvailable = () => codex != null; codexDelete = codex; }
         internal static string ConfiguredHome(Provider provider)
         {
             string environment = Environment.GetEnvironmentVariable(provider == Provider.Claude ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME");
@@ -209,8 +187,6 @@ namespace SessionPurge
                 if (globalBlock != null) catalog.Notices.Add(globalBlock);
                 if (catalog.ViaCodex) catalog.Notices.Add("Codex threads are deleted with the Codex CLI (codex delete), which also removes Codex's own database records.");
                 if (layout.Ignored > 0) catalog.Notices.Add(layout.Ignored + " other item(s) in the history folders are not recognized as transcripts and are left unchanged; sessions they name are blocked.");
-                string warning = activity();
-                if (warning != null) catalog.Notices.Add(warning);
                 if (catalog.Inventory != Inventory(catalog, lease, cancellation).Text) throw new SafetyException("History files were added or removed during scanning. Rescan.");
                 return catalog;
             }
@@ -380,7 +356,8 @@ namespace SessionPurge
                 int missing = session.Dependents.Count(id => !ids.Contains(id));
                 if (missing > 0) throw new SafetyException("Session " + session.Id + " has " + missing + " other session(s) that build on it. Select them too, or delete them first.");
             }
-            var plan = new DeletionPlan { Catalog = catalog, ViaCodex = catalog.ViaCodex, Sessions = Order(chosen), Expires = Clock().AddMinutes(2), Warning = activity() };
+            CheckOpen(catalog, chosen);
+            var plan = new DeletionPlan { Catalog = catalog, ViaCodex = catalog.ViaCodex, Sessions = Order(chosen), Expires = Clock().AddMinutes(2) };
             if (plan.ViaCodex) return plan;
             foreach (var session in plan.Sessions) plan.Artifacts.AddRange(Artifacts(catalog, session, true, CancellationToken.None));
             using (var lease = new DirectoryLease(catalog.Root))
@@ -425,6 +402,7 @@ namespace SessionPurge
                 CheckConfiguredHome(plan.Catalog.Provider, plan.Catalog.Root);
                 if (plan.Sessions.Count == 0 || plan.Sessions.Any(s => !s.Eligible || !plan.Catalog.Sessions.Contains(s))) throw new SafetyException("Invalid deletion plan.");
                 CheckRunning(plan);
+                CheckOpen(plan.Catalog, plan.Sessions);
                 if (plan.ViaCodex) return DeleteWithCodex(plan, cancellation, checkpoint);
                 if (plan.Transactional) return DeleteCoordinated(plan, cancellation, checkpoint);
                 using (var lease = new DirectoryLease(plan.Catalog.Root))
@@ -457,6 +435,42 @@ namespace SessionPurge
             var running = RunningClaudeSessions(plan.Catalog.Root);
             if (running == null) throw new SafetyException("Claude Code's list of running sessions could not be read. Nothing further was deleted.");
             if (plan.Sessions.Any(s => running.Contains(s.Id))) throw new SafetyException("A selected session is running in Claude Code now. Nothing further was deleted.");
+        }
+        private void CheckOpen(Catalog catalog, IList<SessionRecord> sessions)
+        {
+            var shared = catalog.Stores.Select(s => SafeFileSystem.Inside(catalog.Root, s.RelativePath)).ToList();
+            var owned = sessions.ToDictionary(s => s, s => SessionPaths(catalog, s));
+            string any = openBy(shared.Concat(owned.Values.SelectMany(p => p)).ToList());
+            if (any == null) return;
+            string common = shared.Count == 0 ? null : openBy(shared);
+            var blocked = new List<SessionRecord>();
+            foreach (var session in sessions)
+            {
+                string reason = common ?? openBy(owned[session]);
+                if (reason != null) { HistoryReader.Block(session, reason); blocked.Add(session); }
+            }
+            if (blocked.Count == 0) foreach (var session in sessions) { HistoryReader.Block(session, any); blocked.Add(session); }
+            throw new SafetyException(blocked.Count + " selected session(s) are now blocked. " + blocked[0].Blocked + " Nothing was deleted.");
+        }
+        private static List<string> SessionPaths(Catalog catalog, SessionRecord session)
+        {
+            var paths = new List<string> { SafeFileSystem.Inside(catalog.Root, session.RelativePath) };
+            foreach (string root in session.ArtifactRoots) ListFiles(catalog.Root, root, 0, paths);
+            return paths;
+        }
+        private static void ListFiles(string root, string relative, int depth, List<string> paths)
+        {
+            if (depth > 8 || paths.Count > 20000) throw new SafetyException("Its session folders are deeper or larger than SessionPurge supports.");
+            string path = SafeFileSystem.Inside(root, relative);
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new SafetyException("A link or junction is inside its session folders: " + SessionNames.SafeText(relative) + ".");
+            foreach (string entry in Entries(path).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                string child = relative + "\\" + Path.GetFileName(entry);
+                FileAttributes attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) throw new SafetyException("A link or junction is inside its session folders: " + SessionNames.SafeText(child) + ".");
+                if ((attributes & FileAttributes.Directory) != 0) ListFiles(root, child, depth + 1, paths);
+                else paths.Add(SafeFileSystem.Inside(root, child));
+            }
         }
         private static List<string> Roots(Catalog catalog, SessionRecord session)
         {

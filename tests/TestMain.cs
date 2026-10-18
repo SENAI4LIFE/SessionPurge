@@ -72,6 +72,7 @@ namespace SessionPurge.Tests
             Control.CheckForIllegalCrossThreadCalls = true;
             if (args.Length == 3 && args[0] == "--interrupt-child") return CrashChild(args[1], args[2]);
             if (args.Length == 3 && args[0] == "--atomic-child") return CrashChild(args[1], args[2], true);
+            if (args.Length == 2 && args[0] == "--hold-child") return HoldChild(args[1]);
             if (args.Length != 1) return 2;
             string developmentRoot = Path.GetFullPath(args[0]);
             string expected = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "dev"));
@@ -101,7 +102,7 @@ namespace SessionPurge.Tests
                 Run("Subagent tool use blocks its session; unknown content blocks are tolerated", NestedBlocks);
                 Run("Claude messages referring to another transcript block deletion", MessageChain);
                 Run("Recent and future-dated transcripts refused", Recent);
-                Run("Running provider processes produce a warning, not a block", Active);
+                Run("Files open in another process block only their sessions, before review and before deletion", OpenHandles);
                 Run("Concurrent writer prevents preflight deletion", Writer);
                 Run("Second-file lock prevents deletion of first file", PreflightAll);
                 Run("Same-length modification with preserved timestamp detected", ContentRace);
@@ -431,15 +432,85 @@ namespace SessionPurge.Tests
             Put(valid, Provider.Claude, A, ClaudeLine(A) + second, false);
             Assert(Scan(valid, Provider.Claude).Sessions.Single().Eligible, "Valid local parent chain rejected.");
         }
-        private static void Active()
+        private static Process Hold(string path)
         {
-            string home = Home(); string file = Claude(home, A);
-            var active = new HistoryEngine(delegate { return "Synthetic active provider"; }, delegate { return Now; });
-            var catalog = active.Scan(Provider.Claude, home, CancellationToken.None);
-            Assert(catalog.Sessions.All(s => s.Eligible) && catalog.Notices.Contains("Synthetic active provider"), "Running processes blocked scanning or gave no warning.");
-            var plan = active.Plan(catalog, catalog.Sessions);
-            Assert(plan.Warning == "Synthetic active provider" && plan.Describe().StartsWith("Synthetic active provider"), "Deletion preview omitted the process warning.");
-            Assert(active.Delete(plan, "DELETE", CancellationToken.None).Deleted == 1 && !File.Exists(file), "The process warning blocked deletion.");
+            var start = new ProcessStartInfo(System.Reflection.Assembly.GetExecutingAssembly().Location, "--hold-child \"" + path + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true };
+            var child = Process.Start(start);
+            var ready = child.StandardOutput.ReadLineAsync();
+            if (!ready.Wait(HangLimit) || ready.Result != "ready") { child.Kill(); child.Dispose(); throw new Exception("Synthetic file holder did not start."); }
+            return child;
+        }
+        private static void Release(Process child)
+        {
+            child.StandardInput.Close();
+            if (!child.WaitForExit((int)HangLimit.TotalMilliseconds)) child.Kill();
+            child.Dispose();
+        }
+        private static int HoldChild(string path)
+        {
+            string safeDev = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "dev")) + Path.DirectorySeparatorChar;
+            if (!Path.GetFullPath(path).StartsWith(safeDev, StringComparison.OrdinalIgnoreCase)) return 2;
+            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                Console.WriteLine("ready");
+                Console.In.ReadToEnd();
+            }
+            return 0;
+        }
+        private static void OpenHandles()
+        {
+            var engine = new HistoryEngine(OpenFiles.Check, delegate { return Now; });
+            string home = Home(); string first = Claude(home, A); string second = Claude(home, B);
+            var catalog = engine.Scan(Provider.Claude, home, CancellationToken.None);
+            Assert(catalog.Sessions.All(s => s.Eligible) && catalog.Notices.All(n => !n.Contains("running")), "Scanning reported processes by name.");
+            var child = Hold(first);
+            try
+            {
+                int pid = child.Id;
+                Refused(() => engine.Plan(catalog, catalog.Sessions));
+                var held = catalog.Sessions.Single(s => s.Id == A);
+                Assert(!held.Eligible && held.Blocked.Contains("SessionPurge.Tests (PID " + pid + ")"), "An open transcript did not block its session with the process name and PID.");
+                Assert(catalog.Sessions.Single(s => s.Id == B).Eligible, "An open transcript blocked an unrelated session.");
+                Assert(engine.Plan(catalog, catalog.Sessions.Where(s => s.Id == B)).Sessions.Count == 1, "The unaffected session could not be planned.");
+            }
+            finally { Release(child); }
+            catalog = engine.Scan(Provider.Claude, home, CancellationToken.None);
+            var plan = engine.Plan(catalog, catalog.Sessions);
+            child = Hold(second);
+            try
+            {
+                var result = engine.Delete(plan, "DELETE", CancellationToken.None);
+                Assert(result.Deleted == 0 && File.Exists(first) && File.Exists(second) && result.Stopped.Contains("PID " + child.Id), "A file opened after the review was deleted.");
+                Assert(catalog.Sessions.Single(s => s.Id == A).Eligible && !catalog.Sessions.Single(s => s.Id == B).Eligible, "The recheck before deletion blocked the wrong session.");
+            }
+            finally { Release(child); }
+            string shared = Home(); Claude(shared, A); Claude(shared, B); WriteStore(shared, "history.jsonl", HistoryRow(Provider.Claude, A) + HistoryRow(Provider.Claude, B));
+            catalog = engine.Scan(Provider.Claude, shared, CancellationToken.None);
+            child = Hold(Path.Combine(shared, "history.jsonl"));
+            try
+            {
+                Refused(() => engine.Plan(catalog, catalog.Sessions.Where(s => s.Id == A)));
+                Assert(!catalog.Sessions.Single(s => s.Id == A).Eligible && catalog.Sessions.Single(s => s.Id == B).Eligible, "An open shared history file blocked unselected sessions or none.");
+            }
+            finally { Release(child); }
+            string folders = Home(); Put(folders, Provider.Claude, A, DelegatingTranscript(A), false); Claude(folders, B); string[] owned = SessionArtifacts(folders, A);
+            catalog = engine.Scan(Provider.Claude, folders, CancellationToken.None);
+            Assert(catalog.Sessions.All(s => s.Eligible), "Session folder fixture was refused.");
+            child = Hold(owned[2]);
+            try
+            {
+                Refused(() => engine.Plan(catalog, catalog.Sessions));
+                Assert(catalog.Sessions.Single(s => s.Id == A).Blocked.Contains("PID " + child.Id) && catalog.Sessions.Single(s => s.Id == B).Eligible, "An open session-folder file did not block exactly its session.");
+            }
+            finally { Release(child); }
+            catalog = engine.Scan(Provider.Claude, folders, CancellationToken.None);
+            using (new FileStream(owned[2], FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                Assert(engine.Plan(catalog, catalog.Sessions).Sessions.Count == 2 && catalog.Sessions.All(s => s.Eligible), "A handle held by SessionPurge itself blocked deletion.");
+            string failing = Home(); string kept = Claude(failing, A); Claude(failing, B);
+            var broken = new HistoryEngine(paths => paths.Any(p => p.Contains(A)) ? "Synthetic Restart Manager failure." : null, delegate { return Now; });
+            catalog = broken.Scan(Provider.Claude, failing, CancellationToken.None);
+            Refused(() => broken.Plan(catalog, catalog.Sessions));
+            Assert(catalog.Sessions.Single(s => s.Id == A).Blocked == "Synthetic Restart Manager failure." && catalog.Sessions.Single(s => s.Id == B).Eligible && File.Exists(kept), "A Restart Manager failure did not block exactly the affected session.");
         }
         private static void Writer()
         {
