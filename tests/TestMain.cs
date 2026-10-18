@@ -62,9 +62,32 @@ namespace SessionPurge.Tests
             return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
         };
 
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool SetTokenInformation(IntPtr token, int type, ref IntPtr owner, int length);
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
+        private static bool OwnNewFiles()
+        {
+            var sid = System.Security.Principal.WindowsIdentity.GetCurrent().User;
+            var bytes = new byte[sid.BinaryLength];
+            sid.GetBinaryForm(bytes, 0);
+            var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+            IntPtr token;
+            try
+            {
+                if (!OpenProcessToken(Process.GetCurrentProcess().Handle, 0x0080, out token)) return false;
+                try { IntPtr owner = pinned.AddrOfPinnedObject(); return SetTokenInformation(token, 4, ref owner, IntPtr.Size); }
+                finally { CloseHandle(token); }
+            }
+            finally { pinned.Free(); }
+        }
+
         [STAThread]
         private static int Main(string[] args)
         {
+            if (!OwnNewFiles()) { Console.WriteLine("Synthetic fixtures cannot be owned by the current user; tests were not run."); return 2; }
             SetProcessDPIAware();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
