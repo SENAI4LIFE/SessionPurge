@@ -105,6 +105,14 @@ Codex rollouts are read both as plain `rollout-*.jsonl` and as compressed
 `rollout-*.jsonl.zst` files, using a built-in Zstandard decoder. Transcripts are
 read up to 256 MiB, after decompression.
 
+**Clean Codex desktop app** (Codex provider, after a scan) removes the Codex
+desktop app's chat-list entries for local threads that no longer have a rollout
+in the scanned home, and empties the app's `Cache`, `Code Cache` and `GPUCache`
+folders. It uses the SQLite library that ships with Windows, refuses while any
+process has `sqlite\codex.db` open (quit the app first) or while the history
+folders contain unrecognized items, and keeps entries from other hosts such as
+your ChatGPT account, which live on OpenAI's servers.
+
 Only records with a selected session ID are removed from shared history files.
 Other JSONL lines keep their exact bytes; retained Claude project-index entries
 keep their JSON text, although whitespace between entries may change.

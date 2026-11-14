@@ -198,6 +198,20 @@ namespace SessionPurge
                 return catalog;
             }
         }
+        // Codex desktop app: drops chat-list rows for threads that no longer have a rollout and empties its web
+        // caches. Needs a Codex scan of the same home, with every item in the history folders recognized.
+        internal DesktopCleanup CleanDesktop(Catalog scanned, IEnumerable<string> cacheRoots = null)
+        {
+            if (scanned == null || scanned.Provider != Provider.Codex) throw new SafetyException("Scan a Codex home first.");
+            CheckConfiguredHome(Provider.Codex, scanned.Root);
+            // Judge by a fresh scan, so a thread created since the last scan is not mistaken for a deleted one.
+            var catalog = Scan(Provider.Codex, scanned.Root, CancellationToken.None);
+            string[] unclear = { "not recognized", "link", "junction", "Shared history", "could not be read" };
+            if (catalog.Notices.Any(n => unclear.Any(n.Contains))) throw new SafetyException("The Codex history folders contain links, unrecognized or unreadable items, so it cannot be told which threads still exist.");
+            string[] ambiguous = { "does not identify this session", "Duplicate session identity", "split across", "second session header" };
+            if (catalog.Sessions.Any(s => s.Blocked != null && ambiguous.Any(s.Blocked.Contains))) throw new SafetyException("A rollout does not clearly identify its thread, so it cannot be told which threads still exist.");
+            return DesktopCleanup.Run(catalog.Root, catalog.Sessions.Select(s => s.Id).ToList(), cacheRoots ?? (configuredHomesOnly ? DesktopCleanup.CacheRoots() : new string[0]), openBy);
+        }
         private static HashSet<string> RunningClaudeSessions(string root)
         {
             var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

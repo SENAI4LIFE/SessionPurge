@@ -190,6 +190,7 @@ namespace SessionPurge.Tests
                 Run("Claude session folders and per-session folders are verified, listed and deleted in one transaction", ClaudeSessionArtifacts);
                 Run("A running Claude session is never deleted", RunningClaudeSession);
                 Run("Codex threads are deleted with the Codex CLI, subagents first, and verified by rescanning", CodexCliDeletion);
+                Run("Codex desktop cleanup removes only stale local chat-list entries and empties caches", DesktopCleaning);
                 Run("Zstandard frames decode exactly and every damaged frame is refused", ZstdDecoding);
                 Run("Compressed Codex rollouts are listed, read and deleted", CompressedRollouts);
                 Run("An unreadable rollout blocks only the threads it names; large records are read", ScopedUnknownLinks);

@@ -29,6 +29,7 @@ namespace SessionPurge
         private readonly Button select = Command("selectVisible", "Select visible");
         private readonly Button clear = Command("clearSelection", "Clear selection");
         private readonly Button purge = Command("reviewDeletion", "Review deletion");
+        private readonly Button desktop = Command("cleanDesktop", "Clean Codex desktop app");
         private readonly Label selection = new Label { Name = "selection", AutoSize = true, UseMnemonic = false };
         private readonly Label status = new Label { Name = "status", Dock = DockStyle.Fill, AutoEllipsis = true, UseMnemonic = false, TextAlign = ContentAlignment.MiddleLeft, Text = "Choose a provider. Nothing has been scanned." };
         private readonly TableLayoutPanel filters;
@@ -67,7 +68,7 @@ namespace SessionPurge
             layout.Controls.Add(Bar(2, Caption("Provider"), providers, root, scan, cancel), 0, 0);
             layout.Controls.Add(filters, 0, 1);
             layout.Controls.Add(split, 0, 2);
-            layout.Controls.Add(Bar(2, select, clear, selection, purge), 0, 3);
+            layout.Controls.Add(Bar(2, select, clear, selection, desktop, purge), 0, 3);
             layout.Controls.Add(status, 0, 4);
             Controls.Add(layout);
             Theme.Apply(this, SystemInformation.HighContrast, scan, purge);
@@ -80,6 +81,7 @@ namespace SessionPurge
             select.Click += delegate { SelectVisible(); };
             clear.Click += delegate { ClearSelection(); };
             purge.Click += async delegate { await PurgeAsync(); };
+            desktop.Click += async delegate { await CleanDesktopAsync(); };
             scan.Enabled = false;
             cancel.Enabled = false;
             Load += delegate
@@ -242,6 +244,23 @@ namespace SessionPurge
             purge.Enabled = !busy && chosen.Count > 0 && chosen.Count <= 500;
             select.Enabled = !busy && catalog != null && catalog.Sessions.Any(s => s.Eligible);
             clear.Enabled = !busy && chosen.Count > 0;
+            desktop.Enabled = !busy && catalog != null && catalog.Provider == Provider.Codex;
+        }
+        private async Task CleanDesktopAsync()
+        {
+            if (busy || catalog == null || catalog.Provider != Provider.Codex) return;
+            var scanned = catalog;
+            if (MessageBox.Show(this, "Remove chat-list entries of deleted local threads from the Codex desktop app and empty its web caches?\r\n\r\nQuit the Codex desktop app first. Entries from your ChatGPT account are kept. This cannot be undone.", "SessionPurge", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            SetBusy(true);
+            status.Text = "Cleaning the Codex desktop app.";
+            try
+            {
+                var result = await Task.Run(() => engine.CleanDesktop(scanned));
+                details.Text = result.Describe();
+                status.Text = result.Stopped == null ? "Codex desktop app cleaned." : "Codex desktop app not cleaned. " + result.Stopped;
+            }
+            catch (Exception exception) { status.Text = HistoryEngine.Reason(exception); }
+            finally { SetBusy(false); }
         }
         private void SetBusy(bool value)
         {
