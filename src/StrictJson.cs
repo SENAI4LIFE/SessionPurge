@@ -11,9 +11,10 @@ namespace SessionPurge
         private readonly string text;
         private int position;
         private StrictJson(string value) { text = value; }
-        internal static Dictionary<string, object> Parse(string value)
+        internal static Dictionary<string, object> Parse(string value) { return Parse(value, 1048576); }
+        internal static Dictionary<string, object> Parse(string value, int limit)
         {
-            if (value.Length > 1048576) throw new SafetyException("JSON row exceeds the supported limit.");
+            if (value.Length > limit) throw new SafetyException("JSON row exceeds the supported limit.");
             var parser = new StrictJson(value);
             object result = parser.Value(0);
             parser.Space();

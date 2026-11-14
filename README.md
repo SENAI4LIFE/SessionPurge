@@ -101,6 +101,10 @@ control characters. No filter recognizes every secret.
   `history.jsonl` and `session_index.jsonl`, in one transactional NTFS
   operation when those files exist. This is refused when Codex keeps thread data in SQLite.
 
+Codex rollouts are read both as plain `rollout-*.jsonl` and as compressed
+`rollout-*.jsonl.zst` files, using a built-in Zstandard decoder. Transcripts are
+read up to 256 MiB, after decompression.
+
 Only records with a selected session ID are removed from shared history files.
 Other JSONL lines keep their exact bytes; retained Claude project-index entries
 keep their JSON text, although whitespace between entries may change.
@@ -118,10 +122,12 @@ A session is blocked, with a specific reason, if it:
 - is split across several rollout files or shares its ID with another file
 - is named by another file in the history folders
 
-Some conditions block more than one session. In a Codex home, every session is
-blocked while any rollout header cannot be read; in a Claude project, every
-session is blocked while another transcript in that project cannot be read
-completely. Every Claude session is blocked if the running-session list cannot
+Some conditions block more than one session. In a Codex home, a rollout that
+cannot be read completely, or that another process holds open, blocks every
+thread whose ID appears in its bytes; every session is blocked while such a
+rollout cannot be searched at all, for example a damaged compressed rollout. In
+a Claude project, every session is blocked while another transcript in that
+project cannot be read completely. Every Claude session is blocked if the running-session list cannot
 be read, and every Codex session is blocked if Codex keeps thread data in SQLite
 and no Codex CLI with a `delete` command is found.
 

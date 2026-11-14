@@ -325,9 +325,10 @@ namespace SessionPurge.Tests
                 string mode = failure == null ? null : failure(id);
                 if (mode == "keep") return null;
                 if (mode != null && mode.StartsWith("error:")) return mode.Substring(6);
-                foreach (string path in Directory.GetFiles(Path.Combine(home, "sessions"), "*" + id + ".jsonl", SearchOption.AllDirectories)) File.Delete(path);
+                foreach (string pattern in new[] { "*" + id + ".jsonl", "*" + id + ".jsonl.zst" })
+                    foreach (string path in Directory.GetFiles(Path.Combine(home, "sessions"), pattern, SearchOption.AllDirectories)) File.Delete(path);
                 string index = Path.Combine(home, "session_index.jsonl");
-                File.WriteAllText(index, string.Concat(File.ReadAllLines(index).Where(line => !line.Contains(id)).Select(line => line + "\n").ToArray()), new UTF8Encoding(false));
+                if (File.Exists(index)) File.WriteAllText(index,string.Concat(File.ReadAllLines(index).Where(line => !line.Contains(id)).Select(line => line + "\n").ToArray()), new UTF8Encoding(false));
                 return mode != null && mode.StartsWith("partial:") ? mode.Substring(8) : null;
             };
         }
@@ -345,6 +346,20 @@ namespace SessionPurge.Tests
             var result = engine.Delete(plan, "DELETE", CancellationToken.None);
             Assert(result.Stopped == null && result.Deleted == 3 && calls.Count == 3 && calls.Last() == B && !File.Exists(parent) && !File.Exists(first) && !File.Exists(second), "Codex CLI deletion failed: " + result.Stopped);
             Assert(result.Notes.Any(n => n.Contains("Rescan confirmed")) && !result.Notes.Any(n => n.Contains("still has")) && result.Notes.Any(n => n.Contains("SQLite")), "Codex deletion was not verified: " + string.Join(" | ", result.Notes.ToArray()));
+
+            home = CodexHome(out parent, out first, out second);
+            calls = new List<string>();
+            string wal = Path.Combine(home, "state_5.sqlite-wal"), shm = Path.Combine(home, "logs_2.sqlite-shm");
+            var sqliteStub = CodexStub(home, calls, delegate(string id)
+            {
+                if (calls.Count == 1) { File.Delete(wal); File.WriteAllText(shm, Body); }
+                if (calls.Count == 2) File.Delete(shm);
+                return null;
+            });
+            engine = new HistoryEngine(delegate { return null; }, delegate { return Now; }, sqliteStub);
+            catalog = engine.Scan(Provider.Codex, home, CancellationToken.None);
+            result = engine.Delete(engine.Plan(catalog, catalog.Sessions), "DELETE", CancellationToken.None);
+            Assert(result.Stopped == null && result.Deleted == 3, "SQLite sidecar files that Codex opens and closes stopped deletion: " + result.Stopped);
 
             foreach (string mode in new[] { "fail", "keep", "extra", "partial", "peer" })
             {

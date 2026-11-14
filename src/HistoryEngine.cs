@@ -119,23 +119,29 @@ namespace SessionPurge
                 {
                     cancellation.ThrowIfCancellationRequested();
                     SessionRecord session = new SessionRecord { RelativePath = relative, Id = HistoryReader.FileId(provider, relative), Project = provider == Provider.Claude ? relative.Split('\\')[1] : "Unsupported transcript" };
+                    HashSet<string> mentioned = null;
+                    string fingerprint = null;
+                    string full = null;
                     try
                     {
-                        string full = SafeFileSystem.Inside(catalog.Root, relative);
+                        full = SafeFileSystem.Inside(catalog.Root, relative);
                         lease.Pin(Path.GetDirectoryName(full));
                         using (var file = new LockedFile(full, false))
                         {
                             session.Bytes = file.Length;
                             session.Modified = file.Modified;
                             session.Identity = file.Identity;
-                            session = HistoryReader.Read(provider, relative, file, cancellation);
+                            session = HistoryReader.Read(provider, relative, file, cancellation, ref mentioned, ref fingerprint);
                         }
                     }
                     catch (Exception exception)
                     {
                         if (exception is OperationCanceledException) throw;
                         session.Blocked = Reason(exception);
+                        if (session.Fingerprint == null) session.Fingerprint = fingerprint;
+                        if (provider == Provider.Codex && mentioned == null && session.Fingerprint == null && full != null) HistoryReader.SharedRead(full, session, cancellation, ref mentioned);
                     }
+                    session.Mentioned = mentioned;
                     catalog.Sessions.Add(session);
                 }
                 var running = provider == Provider.Claude ? RunningClaudeSessions(catalog.Root) : new HashSet<string>();
@@ -144,7 +150,8 @@ namespace SessionPurge
                     if (running == null) HistoryReader.Block(session, "Claude Code's list of running sessions could not be read, so the running session is unknown. Rescan.");
                     else if (running.Contains(session.Id)) HistoryReader.Block(session, "Running in Claude Code right now.");
                     if (layout.MentionedIds.Contains(session.Id)) HistoryReader.Block(session, "Other history files carry this session ID and would be left behind.");
-                    if (provider == Provider.Codex && catalog.Sessions.Any(s => s != session && !s.LinksKnown)) HistoryReader.Block(session, "Another rollout could not be identified, so links between threads are unknown.");
+                    if (provider == Provider.Codex && catalog.Sessions.Any(s => s != session && !s.LinksKnown && s.Mentioned == null)) HistoryReader.Block(session, "Another rollout could not be identified, so links between threads are unknown.");
+                    if (provider == Provider.Codex && catalog.Sessions.Any(s => s != session && !s.LinksKnown && s.Mentioned != null && s.Mentioned.Contains(session.Id))) HistoryReader.Block(session, "A rollout that could not be read completely mentions this thread, so links to it are unknown.");
                     if (provider == Provider.Claude && catalog.Sessions.Any(s => s != session && !s.LinksKnown && string.Equals(Path.GetDirectoryName(s.RelativePath), Path.GetDirectoryName(session.RelativePath), StringComparison.OrdinalIgnoreCase))) HistoryReader.Block(session, "Another transcript in this project could not be read completely, so links to this session are unknown.");
                     if (session.Modified > Clock().AddMinutes(-15)) HistoryReader.Block(session, "Recently modified or future-dated transcript; wait at least 15 minutes and rescan.");
                     if (globalBlock != null) HistoryReader.Block(session, globalBlock);
@@ -231,9 +238,13 @@ namespace SessionPurge
             {
                 cancellation.ThrowIfCancellationRequested();
                 string name = Path.GetFileName(entry);
+                // SQLite creates and removes its -wal, -shm and -journal files whenever Codex opens or closes a
+                // database, including during codex delete. They hold no rollout and are never opened, so they
+                // stay out of the layout and may vanish between listing and inspection.
+                if (catalog.Provider == Provider.Codex && Regex.IsMatch(name, "\\.sqlite-(wal|shm|journal)$", RegexOptions.CultureInvariant)) { databases.Add(name); continue; }
                 FileAttributes attributes = File.GetAttributes(entry);
-                layout.Entries.Add(name + ":" + (int)attributes);
                 bool directory = (attributes & FileAttributes.Directory) != 0;
+                layout.Entries.Add(name + ":" + (int)attributes);
                 bool history = directory && (catalog.Provider == Provider.Claude ? name == "projects" : name == "sessions" || name == "archived_sessions");
                 if (history)
                 {

@@ -28,6 +28,7 @@ namespace SessionPurge
         internal int Rows;
         internal HashSet<string> LinkedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         internal bool LinksKnown;
+        internal HashSet<string> Mentioned;
         internal List<string> ArtifactRoots = new List<string>();
         internal bool Delegates;
         internal List<string> Dependents = new List<string>();

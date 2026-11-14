@@ -10,7 +10,10 @@ namespace SessionPurge
     internal static class HistoryReader
     {
         private static readonly Regex Uuid = new Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", RegexOptions.CultureInvariant);
-        private static readonly Regex Rollout = new Regex("^rollout-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-(?<id>[0-9a-fA-F-]{36})\\.jsonl$", RegexOptions.CultureInvariant);
+        private static readonly Regex Rollout = new Regex("^rollout-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-(?<id>[0-9a-fA-F-]{36})\\.jsonl(\\.zst)?$", RegexOptions.CultureInvariant);
+        // Largest transcript (after decompression) and record that are read; one record may be the whole file.
+        internal const int MaxTranscriptBytes = 256 * 1024 * 1024;
+        internal static bool Compressed(string path) { return path.EndsWith(".jsonl.zst", StringComparison.Ordinal); }
         internal static bool IsUuid(string value) { return value != null && Uuid.IsMatch(value); }
         internal static string FileId(Provider provider, string path)
         {
@@ -22,55 +25,161 @@ namespace SessionPurge
             return provider == Provider.Claude ? name.EndsWith(".jsonl", StringComparison.Ordinal) && IsUuid(Path.GetFileNameWithoutExtension(name)) : Rollout.IsMatch(name) && IsUuid(Rollout.Match(name).Groups["id"].Value);
         }
         internal static void Block(SessionRecord session, string reason) { if (session.Blocked == null) session.Blocked = reason; }
-        internal static SessionRecord Read(Provider provider, string relative, LockedFile file, System.Threading.CancellationToken cancellation)
+        // mentioned receives, for a Codex rollout whose links stay unknown, every thread ID its bytes
+        // contain, so only those threads are held back; it stays null when the bytes cannot be searched.
+        internal static SessionRecord Read(Provider provider, string relative, LockedFile file, System.Threading.CancellationToken cancellation, ref HashSet<string> mentioned, ref string fingerprint)
         {
             var session = new SessionRecord { RelativePath = relative, Bytes = file.Length, Modified = file.Modified, Identity = file.Identity };
             session.Id = FileId(provider, relative);
             session.Project = provider == Provider.Claude ? relative.Split('\\')[1] : "Unknown project";
-            if (file.Length == 0 || file.Length > 32 * 1024 * 1024) throw new SafetyException("Empty transcript or transcript larger than 32 MiB.");
-            session.Fingerprint = file.Hash();
+            if (file.Length == 0 && provider == Provider.Codex) mentioned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (file.Length == 0 || file.Length > MaxTranscriptBytes) throw new SafetyException("Empty transcript or transcript larger than 256 MiB.");
+            fingerprint = file.Hash();
+            session.Fingerprint = fingerprint;
             var bytes = file.ReadAll(cancellation);
+            if (provider == Provider.Codex && Compressed(relative))
+            {
+                if (!Zstd.IsFrame(bytes)) { Array.Clear(bytes, 0, bytes.Length); throw new SafetyException("The compressed rollout is not a valid Zstandard stream."); }
+                byte[] packed = bytes;
+                try { bytes = Zstd.Decompress(packed, MaxTranscriptBytes, cancellation); }
+                finally { Array.Clear(packed, 0, packed.Length); }
+                if (bytes.Length == 0) { mentioned = new HashSet<string>(StringComparer.OrdinalIgnoreCase); throw new SafetyException("The compressed rollout is empty."); }
+            }
             try
             {
-                string content = StrictJson.Utf8.GetString(bytes);
-                if (content[0] == '﻿') Block(session, "The transcript starts with a byte-order mark.");
-                if (content[content.Length - 1] != '\n') Block(session, "The last record is incomplete; the transcript may still be in use.");
-                var names = new SessionNames(provider, session.Id);
-                string[] lines = content.Split('\n');
-                int unreadable = 0;
-                for (int i = 0; i < lines.Length - 1; i++)
+                Parse(provider, session, bytes, cancellation);
+                if (provider == Provider.Codex && !session.LinksKnown) mentioned = MentionedIds(bytes);
+                return session;
+            }
+            catch (SafetyException) { if (provider == Provider.Codex) mentioned = MentionedIds(bytes); throw; }
+            catch (ArgumentException) { if (provider == Provider.Codex) mentioned = MentionedIds(bytes); throw; }
+            finally { Array.Clear(bytes, 0, bytes.Length); }
+        }
+        private static void Parse(Provider provider, SessionRecord session, byte[] bytes, System.Threading.CancellationToken cancellation)
+        {
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) Block(session, "The transcript starts with a byte-order mark.");
+            if (bytes[bytes.Length - 1] != 10) Block(session, "The last record is incomplete; the transcript may still be in use.");
+            var names = new SessionNames(provider, session.Id);
+            int unreadable = 0;
+            int start = 0;
+            while (start < bytes.Length)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                int newline = Array.IndexOf(bytes, (byte)10, start);
+                bool complete = newline >= 0;
+                int end = complete ? newline : bytes.Length;
+                string line = StrictJson.Utf8.GetString(bytes, start, end - start);
+                start = end + 1;
+                if (!complete)
                 {
-                    cancellation.ThrowIfCancellationRequested();
-                    if (++session.Rows > 100000) { Block(session, "The transcript has more than 100,000 records."); unreadable++; break; }
-                    if (lines[i].TrimEnd('\r').Length == 0) { Block(session, "The transcript contains blank lines."); continue; }
-                    Dictionary<string, object> row;
-                    try { row = StrictJson.Parse(lines[i]); }
-                    catch (SafetyException) { unreadable++; continue; }
-                    names.Observe(row, session.Rows);
-                    if (provider == Provider.Claude) ReadClaude(session, row);
-                    else ReadCodex(session, row, session.Rows);
-                }
-                if (lines.Length > 0 && lines[lines.Length - 1].Trim().Length > 0)
-                {
+                    if (line.Trim().Length == 0) break;
                     try
                     {
-                        var partial = StrictJson.Parse(lines[lines.Length - 1]);
+                        var partial = StrictJson.Parse(line, MaxTranscriptBytes);
                         if (provider == Provider.Claude) ReadClaude(session, partial);
                         else ReadCodex(session, partial, session.Rows + 1);
                         Links(session, partial);
                         session.LinkedIds.Remove(session.Id);
                     }
                     catch (SafetyException) { unreadable++; }
+                    break;
                 }
-                if (unreadable > 0) Block(session, unreadable + " record(s) could not be read.");
-                if (provider == Provider.Claude) session.LinksKnown = unreadable == 0;
-                else if (unreadable > 0) session.LinksKnown = false;
-                names.Apply(session);
-                if (session.ReferencedMessageIds.Any(id => !session.MessageIds.Contains(id))) Block(session, "Messages refer to another transcript (resumed or forked conversation).");
-                return session;
+                if (++session.Rows > 100000) { Block(session, "The transcript has more than 100,000 records."); unreadable++; break; }
+                if (line.TrimEnd('\r').Length == 0) { Block(session, "The transcript contains blank lines."); continue; }
+                Dictionary<string, object> row;
+                try { row = StrictJson.Parse(line, MaxTranscriptBytes); }
+                catch (SafetyException) { unreadable++; continue; }
+                names.Observe(row, session.Rows);
+                if (provider == Provider.Claude) ReadClaude(session, row);
+                else ReadCodex(session, row, session.Rows);
             }
-            finally { Array.Clear(bytes, 0, bytes.Length); }
+            if (unreadable > 0) Block(session, unreadable + " record(s) could not be read.");
+            if (provider == Provider.Claude) session.LinksKnown = unreadable == 0;
+            else if (unreadable > 0) session.LinksKnown = false;
+            names.Apply(session);
+            if (session.ReferencedMessageIds.Any(id => !session.MessageIds.Contains(id))) Block(session, "Messages refer to another transcript (resumed or forked conversation).");
         }
+        // Collects every UUID written in the bytes as plain ASCII. Returns null if any JSON escape could
+        // spell a UUID character, because an escaped ID would then be invisible to this search.
+        internal static HashSet<string> MentionedIds(byte[] bytes)
+        {
+            var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i + 6 <= bytes.Length; i++)
+            {
+                if (bytes[i] != (byte)'\\') continue;
+                int run = 1;
+                while (i + run < bytes.Length && bytes[i + run] == (byte)'\\') run++;
+                i += run - 1;
+                // Only an odd run of backslashes starts an escape; "\\u0031" is an escaped backslash and text.
+                if (run % 2 == 1 && i + 6 <= bytes.Length && bytes[i + 1] == (byte)'u')
+                {
+                    int code;
+                    if (int.TryParse(System.Text.Encoding.ASCII.GetString(bytes, i + 2, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out code) && UuidCharacter(code)) return null;
+                }
+            }
+            for (int i = 0; i + 36 <= bytes.Length; i++)
+            {
+                if (!Hex(bytes[i])) continue;
+                bool match = true;
+                for (int k = 0; k < 36 && match; k++) match = k == 8 || k == 13 || k == 18 || k == 23 ? bytes[i + k] == (byte)'-' : Hex(bytes[i + k]);
+                if (match) found.Add(System.Text.Encoding.ASCII.GetString(bytes, i, 36));
+            }
+            return found;
+        }
+        // For a rollout another process holds open (a running Codex thread), reads its current bytes
+        // without locking them so the threads it names can still be found. The session stays blocked;
+        // its snapshot lets later checks read only what was appended.
+        internal static void SharedRead(string path, SessionRecord session, System.Threading.CancellationToken cancellation, ref HashSet<string> mentioned)
+        {
+            try
+            {
+                using (var stream = OpenShared(path))
+                {
+                    Native.FileInfo info;
+                    if (!Native.GetFileInformationByHandle(stream.SafeFileHandle, out info) || (info.Attributes & 0x400u) != 0 || info.Links != 1) return;
+                    long length = ((long)info.SizeHigh << 32) | info.SizeLow;
+                    if (length > MaxTranscriptBytes) return;
+                    var bytes = new byte[length];
+                    byte[] content = null;
+                    try
+                    {
+                        for (int offset = 0; offset < bytes.Length; )
+                        {
+                            cancellation.ThrowIfCancellationRequested();
+                            int read = stream.Read(bytes, offset, bytes.Length - offset);
+                            if (read == 0) return;
+                            offset += read;
+                        }
+                        content = Compressed(path) ? (Zstd.IsFrame(bytes) ? Zstd.Decompress(bytes, MaxTranscriptBytes, cancellation) : null) : bytes;
+                        if (content == null) return;
+                        using (var hash = SHA256.Create()) session.Fingerprint = Convert.ToBase64String(hash.ComputeHash(bytes));
+                        session.Identity = info.Volume + ":" + info.IndexHigh + ":" + info.IndexLow;
+                        session.Bytes = length;
+                        session.Modified = DateTime.FromFileTimeUtc(((long)info.Written.dwHighDateTime << 32) | (uint)info.Written.dwLowDateTime);
+                        mentioned = MentionedIds(content);
+                    }
+                    finally
+                    {
+                        Array.Clear(bytes, 0, bytes.Length);
+                        if (content != null && content != bytes) Array.Clear(content, 0, content.Length);
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (SafetyException) { }
+            catch (ArgumentException) { }
+        }
+        // Opens without locking and without following a link, so the attribute checks see the link itself.
+        private static FileStream OpenShared(string path)
+        {
+            var handle = Native.CreateFile(path, 0x80000000u, 7u, IntPtr.Zero, 3, 0x00200000u, IntPtr.Zero);
+            if (handle.IsInvalid) { handle.Dispose(); throw new IOException("The file cannot be opened."); }
+            try { return new FileStream(handle, FileAccess.Read, 65536, false); }
+            catch { handle.Dispose(); throw; }
+        }
+        private static bool Hex(byte value) { return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'; }
+        private static bool UuidCharacter(int code) { return code == '-' || code < 128 && Hex((byte)code); }
         private static void ReadClaude(SessionRecord session, Dictionary<string, object> row)
         {
             string type = StrictJson.Text(row, "type") ?? "record";
@@ -138,15 +247,20 @@ namespace SessionPurge
             try
             {
                 var probe = new SessionRecord();
-                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var stream = OpenShared(path))
                 {
                     Native.FileInfo info;
                     if (!Native.GetFileInformationByHandle(stream.SafeFileHandle, out info) || (info.Attributes & 0x400u) != 0 || info.Links != 1) return null;
                     if (session.Identity != null && session.Identity != info.Volume + ":" + info.IndexHigh + ":" + info.IndexLow) return null;
                     long length = ((long)info.SizeHigh << 32) | info.SizeLow;
                     DateTime written = DateTime.FromFileTimeUtc(((long)info.Written.dwHighDateTime << 32) | (uint)info.Written.dwLowDateTime);
-                    if (length == session.Bytes && written == session.Modified) return probe.LinkedIds;
-                    if (length < session.Bytes || length - session.Bytes > 32 * 1024 * 1024 || session.Fingerprint == null) return null;
+                    if (length == session.Bytes && written == session.Modified)
+                    {
+                        // Same size and time can still hide a rewrite; a known snapshot must match byte for byte.
+                        if (session.Fingerprint == null) return probe.LinkedIds;
+                        using (var hash = SHA256.Create()) return Convert.ToBase64String(hash.ComputeHash(stream)) == session.Fingerprint ? probe.LinkedIds : null;
+                    }
+                    if (Compressed(path) || length < session.Bytes || length - session.Bytes > 32 * 1024 * 1024 || session.Fingerprint == null) return null;
                     using (var hash = SHA256.Create())
                     {
                         var buffer = new byte[65536];
@@ -168,7 +282,7 @@ namespace SessionPurge
                     while ((line = Line(stream)) != null)
                     {
                         if (line.Trim().Length == 0) continue;
-                        Links(probe, StrictJson.Parse(line));
+                        Links(probe, StrictJson.Parse(line, MaxTranscriptBytes));
                     }
                 }
                 return probe.LinkedIds;
@@ -187,7 +301,7 @@ namespace SessionPurge
         {
             var buffer = new List<byte>();
             int value;
-            while ((value = stream.ReadByte()) >= 0 && value != 10) { buffer.Add((byte)value); if (buffer.Count > 1048576) throw new SafetyException("Record too long."); }
+            while ((value = stream.ReadByte()) >= 0 && value != 10) { buffer.Add((byte)value); if (buffer.Count > 32 * 1024 * 1024) throw new SafetyException("Record too long."); }
             return value == 10 || buffer.Count > 0 ? StrictJson.Utf8.GetString(buffer.ToArray()) : null;
         }
         private static void Reference(SessionRecord session, string id) { if (id != null) session.ReferencedMessageIds.Add(id); }

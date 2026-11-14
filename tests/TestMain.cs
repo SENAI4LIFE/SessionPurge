@@ -190,6 +190,9 @@ namespace SessionPurge.Tests
                 Run("Claude session folders and per-session folders are verified, listed and deleted in one transaction", ClaudeSessionArtifacts);
                 Run("A running Claude session is never deleted", RunningClaudeSession);
                 Run("Codex threads are deleted with the Codex CLI, subagents first, and verified by rescanning", CodexCliDeletion);
+                Run("Zstandard frames decode exactly and every damaged frame is refused", ZstdDecoding);
+                Run("Compressed Codex rollouts are listed, read and deleted", CompressedRollouts);
+                Run("An unreadable rollout blocks only the threads it names; large records are read", ScopedUnknownLinks);
                 Console.WriteLine("UNAVAILABLE CASES: " + (unavailable.Count == 0 ? "none" : string.Join("; ", unavailable.ToArray())));
                 Console.WriteLine("RESULT: " + passed + " passed; " + failed + " failed; " + unavailable.Count + " unavailable.");
                 return failed == 0 ? 0 : 1;
@@ -410,8 +413,8 @@ namespace SessionPurge.Tests
             }
             string twice = Home(); Codex(twice, B, false); Put(twice, Provider.Codex, A, CodexText(A) + CodexText(A).Split('\n')[0].Replace("\"source\":\"cli\"", "\"source\":\"cli\",\"history_base\":{\"thread_id\":\"" + B + "\"}") + "\n", false);
             Assert(!Scan(twice, Provider.Codex).Sessions.Single(s => s.Id == B).Eligible, "A second rollout header hid a link.");
-            string unknown = Home(); Codex(unknown, B, false); Put(unknown, Provider.Codex, A, "{broken}\n" + CodexText(A), false);
-            Assert(Scan(unknown, Provider.Codex).Sessions.Single(s => s.Id == B).Blocked.Contains("links between threads are unknown"), "An unidentifiable rollout did not block possible parents.");
+            string unknown = Home(); Codex(unknown, B, false); Put(unknown, Provider.Codex, A, "{broken}\n" + CodexText(A).Replace("\"source\":\"cli\"", "\"source\":\"cli\",\"parent_thread_id\":\"" + B + "\""), false);
+            Assert(Scan(unknown, Provider.Codex).Sessions.Single(s => s.Id == B).Blocked.Contains("mentions this thread"), "An unidentifiable rollout did not block the parent it names.");
         }
         private static void Recent()
         {
@@ -690,8 +693,12 @@ namespace SessionPurge.Tests
         }
         private static void FileLimits()
         {
-            foreach (string text in new[] { "", "\ufeff" + ClaudeLine(A), ClaudeLine(A) + "\n", "{\"x\":\"" + new string('x', 1048577) + "\"}\n" })
+            foreach (string text in new[] { "", "\ufeff" + ClaudeLine(A), ClaudeLine(A) + "\n" })
             { string home = Home(); Put(home, Provider.Claude, A, text, false); Blocked(home, Provider.Claude); }
+            string oversized = Home(); string file = Put(oversized, Provider.Claude, A, ClaudeLine(A), false);
+            using (var stream = new FileStream(file, FileMode.Open, FileAccess.Write)) stream.SetLength(HistoryReader.MaxTranscriptBytes + 1L);
+            File.SetLastWriteTimeUtc(file, Now.AddDays(-10));
+            Assert(Scan(oversized, Provider.Claude).Sessions.Single().Blocked.Contains("larger than 256 MiB"), "A transcript over the size limit was not refused.");
         }
         private static void UncertainPeer()
         {
